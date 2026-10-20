@@ -339,6 +339,13 @@ class Benchmark:
             latency = (end - start) / n_rep * 1000
         elif Config.mode == consts.BenchMode.CUDAGRAPH:
             do_bench_cudagraph = triton.testing.do_bench_cudagraph
+            # Warm both providers through the same graph path before measurement.
+            if Config.warm_up > 0:
+                do_bench_cudagraph(
+                    fn,
+                    rep=Config.warm_up,
+                    grad_to_none=xs if self.is_backward else None,
+                )
             latency = do_bench_cudagraph(
                 fn,
                 rep=Config.repetition,
