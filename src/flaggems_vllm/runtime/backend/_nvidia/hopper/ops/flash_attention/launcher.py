@@ -19,8 +19,7 @@ import logging
 import torch
 
 from flaggems_vllm.runtime import torch_device_fn
-
-from .common import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.common import (
     _fa3_device_properties,
     _reset_scheduler_counter,
     _tma_strides_are_aligned,
@@ -28,16 +27,28 @@ from .common import (
     is_fa3_supported,
     normalize_window,
 )
-from .config import PAGED_GATHER_AUTO, _ceil_div, _next_power_of_2
-from .decode import _zero_decode_split_counters
-from .direct import launch_direct
-from .persistent import launch_persistent
-from .scheduling import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
+    PAGED_GATHER_AUTO,
+    _ceil_div,
+    _next_power_of_2,
+)
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.decode import (
+    _zero_decode_split_counters,
+)
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.direct import (
+    launch_direct,
+)
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.persistent import (
+    launch_persistent,
+)
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.scheduling import (
     MIN_EXPLICIT_SPLIT_K,
     select_decode_schedule,
     select_paged_schedule,
 )
-from .split_combine import combine_persistent_split_kv
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.split_combine import (
+    combine_persistent_split_kv,
+)
 
 logger = logging.getLogger(__name__)
 

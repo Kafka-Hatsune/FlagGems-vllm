@@ -18,9 +18,7 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
-from flaggems_vllm.utils import libentry, libtuner
-
-from .common import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.common import (
     _apply_alibi_v3,
     _apply_mask_v3,
     _apply_softcap_v3,
@@ -31,7 +29,7 @@ from .common import (
     _softmax_online_deferred,
     _split_n_block_range,
 )
-from .config import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
     DIRECT_DECODE_POLICY_VERSION,
     _next_power_of_2,
     binary_heads_in_l2,
@@ -41,7 +39,10 @@ from .config import (
     get_compact_m_upper,
     prune_direct_configs,
 )
-from .decode import flash_varlen_fwd_v3_tle_decode_kernel
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.decode import (
+    flash_varlen_fwd_v3_tle_decode_kernel,
+)
+from flaggems_vllm.utils import libentry, libtuner
 
 
 def _fa3_direct_configs():

@@ -20,10 +20,7 @@ import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 
 from flaggems_vllm import runtime
-from flaggems_vllm.utils import libentry, libtuner
-from flaggems_vllm.utils.libentry import LibTuner
-
-from .common import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.common import (
     _apply_alibi_v3,
     _apply_mask_v3,
     _apply_softcap_v3,
@@ -45,7 +42,7 @@ from .common import (
     _store_packed_gqa_tile_from_regs,
     tle,
 )
-from .config import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
     PERSISTENT_AUTOTUNE_POLICY_VERSION,
     block_k,
     padded_head_dim,
@@ -55,6 +52,8 @@ from .config import (
     select_sm_count_profile,
     select_stable_config,
 )
+from flaggems_vllm.utils import libentry, libtuner
+from flaggems_vllm.utils.libentry import LibTuner
 
 
 @LibTuner.register_policy("fa3_persistent_stable")

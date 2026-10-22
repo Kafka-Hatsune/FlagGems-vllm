@@ -18,14 +18,17 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
-from flaggems_vllm.utils import libentry, libtuner
-
-from .common import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.common import (
     _paged_blockwise_cache_indices,
     _softmax_online_deferred,
     _split_n_block_range,
 )
-from .config import block_k, direct_configs, prune_direct_configs
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
+    block_k,
+    direct_configs,
+    prune_direct_configs,
+)
+from flaggems_vllm.utils import libentry, libtuner
 
 
 @triton.jit

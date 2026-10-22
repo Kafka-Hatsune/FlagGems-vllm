@@ -14,6 +14,8 @@
 
 """Hopper FA3 execution entry."""
 
-from .launcher import launch_attention
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.launcher import (
+    launch_attention,
+)
 
 __all__ = ["launch_attention"]

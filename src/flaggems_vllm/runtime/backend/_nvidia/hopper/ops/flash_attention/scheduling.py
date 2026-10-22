@@ -16,7 +16,7 @@
 
 from functools import lru_cache
 
-from .config import (
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
     PAGED_GATHER_AUTO,
     PAGED_GATHER_BLOCKWISE,
     PAGED_GATHER_LEGACY,

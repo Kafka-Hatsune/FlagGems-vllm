@@ -17,10 +17,14 @@
 import triton
 import triton.language as tl
 
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.common import (
+    _ragged_persistent_tile_coords,
+    _split_kv_count,
+)
+from flaggems_vllm.runtime.backend._nvidia.hopper.ops.flash_attention.config import (
+    combine_launch_plan,
+)
 from flaggems_vllm.utils import libentry
-
-from .common import _ragged_persistent_tile_coords, _split_kv_count
-from .config import combine_launch_plan
 
 
 @libentry()
