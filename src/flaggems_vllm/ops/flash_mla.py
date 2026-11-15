@@ -17,10 +17,12 @@ import math
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
+from inspect import signature
 
 import torch
 import triton
 import triton.language as tl
+from triton.language.core import builtin
 
 from flaggems_vllm.runtime import device, error, torch_device_fn  # noqa: E402
 from flaggems_vllm.utils import triton_lang_extension as ext  # noqa: E402
@@ -38,6 +40,34 @@ if has_triton_tle(3, 6, 0):
 else:
     tle = None
     HAS_TLE_FLASH_MLA = False
+
+
+_HAS_COPY_POLICY = (
+    tle is not None
+    and hasattr(tle.gpu, "copy")
+    and "cache_policy" in signature(tle.gpu.copy).parameters
+)
+if _HAS_COPY_POLICY:
+    _copy_with_cache_policy = tle.gpu.copy
+else:
+
+    @builtin
+    def _copy_with_cache_policy(
+        src, dst, shape, offsets, barrier=None, *, cache_policy=None, _semantic=None
+    ):
+        return tle.gpu.copy(
+            src, dst, shape, offsets, barrier=barrier, _semantic=_semantic
+        )
+
+
+_EVICT_FIRST = tl.constexpr(
+    tle.gpu.CachePolicy(l2=tle.gpu.FractionalEvictionPolicy("evict_first"))
+    if _HAS_COPY_POLICY
+    and hasattr(tle.gpu, "CachePolicy")
+    and hasattr(tle.gpu, "FractionalEvictionPolicy")
+    else None
+)
+
 
 vendor_name = device.vendor_name
 device = device.name
@@ -313,20 +343,38 @@ def _flash_mla_ws_kv_producer(
     HEAD_DIM_V: tl.constexpr,
     D_CHUNK: tl.constexpr,
     HAVE_TAIL: tl.constexpr,
+    EVICT_Q: tl.constexpr = False,
+    EVICT_KV: tl.constexpr = False,
 ):
+    q_policy: tl.constexpr = _EVICT_FIRST if EVICT_Q else None
+    kv_policy: tl.constexpr = _EVICT_FIRST if EVICT_KV else None
     pipe_base = 0
     k1_pipe_base = 0
     for batch_idx in tl.range(begin_req_idx, end_req_idx + 1):
         q_stage = batch_idx - begin_req_idx
         q_row = batch_idx * head_num + head_base
         q_slot = q_writer.acquire(q_stage)
-        tle.gpu.copy(Q_desc, q_slot.sQ_l, [BLOCK_M, HEAD_DIM_V // 2], [q_row, 0])
-        tle.gpu.copy(
-            Q_desc, q_slot.sQ_r, [BLOCK_M, HEAD_DIM_V // 2], [q_row, HEAD_DIM_V // 2]
+        _copy_with_cache_policy(
+            Q_desc,
+            q_slot.sQ_l,
+            [BLOCK_M, HEAD_DIM_V // 2],
+            [q_row, 0],
+            cache_policy=q_policy,
+        )
+        _copy_with_cache_policy(
+            Q_desc,
+            q_slot.sQ_r,
+            [BLOCK_M, HEAD_DIM_V // 2],
+            [q_row, HEAD_DIM_V // 2],
+            cache_policy=q_policy,
         )
         if HAVE_TAIL:
-            tle.gpu.copy(
-                Q_tail_desc, q_slot.sQ_tail, [BLOCK_M, D_CHUNK], [q_row, HEAD_DIM_V]
+            _copy_with_cache_policy(
+                Q_tail_desc,
+                q_slot.sQ_tail,
+                [BLOCK_M, D_CHUNK],
+                [q_row, HEAD_DIM_V],
+                cache_policy=q_policy,
             )
         q_writer.commit(q_stage)
 
@@ -353,46 +401,58 @@ def _flash_mla_ws_kv_producer(
             kv_row1 = page1 * PAGE_SIZE
 
             k0_l_slot = k0_l_writer.acquire(pipe_idx)
-            tle.gpu.copy(
-                Kv_desc, k0_l_slot.sK, [BLOCK_N, HEAD_DIM_V // 2], [kv_row0, 0]
+            _copy_with_cache_policy(
+                Kv_desc,
+                k0_l_slot.sK,
+                [BLOCK_N, HEAD_DIM_V // 2],
+                [kv_row0, 0],
+                cache_policy=kv_policy,
             )
             k0_l_writer.commit(pipe_idx)
 
             k0_r_slot = k0_r_writer.acquire(pipe_idx)
-            tle.gpu.copy(
+            _copy_with_cache_policy(
                 Kv_desc,
                 k0_r_slot.sK,
                 [BLOCK_N, HEAD_DIM_V // 2],
                 [kv_row0, HEAD_DIM_V // 2],
+                cache_policy=kv_policy,
             )
             if HAVE_TAIL:
-                tle.gpu.copy(
+                _copy_with_cache_policy(
                     Kv_tail_desc,
                     k0_r_slot.sK_tail,
                     [BLOCK_N, D_CHUNK],
                     [kv_row0, HEAD_DIM_V],
+                    cache_policy=kv_policy,
                 )
             k0_r_writer.commit(pipe_idx)
 
             k1_l_slot = k1_l_writer.acquire(k1_pipe_idx)
-            tle.gpu.copy(
-                Kv_desc, k1_l_slot.sK, [BLOCK_N, HEAD_DIM_V // 2], [kv_row1, 0]
+            _copy_with_cache_policy(
+                Kv_desc,
+                k1_l_slot.sK,
+                [BLOCK_N, HEAD_DIM_V // 2],
+                [kv_row1, 0],
+                cache_policy=kv_policy,
             )
             k1_l_writer.commit(k1_pipe_idx)
 
             k1_r_slot = k1_r_writer.acquire(k1_pipe_idx)
-            tle.gpu.copy(
+            _copy_with_cache_policy(
                 Kv_desc,
                 k1_r_slot.sK,
                 [BLOCK_N, HEAD_DIM_V // 2],
                 [kv_row1, HEAD_DIM_V // 2],
+                cache_policy=kv_policy,
             )
             if HAVE_TAIL:
-                tle.gpu.copy(
+                _copy_with_cache_policy(
                     Kv_tail_desc,
                     k1_r_slot.sK_tail,
                     [BLOCK_N, D_CHUNK],
                     [kv_row1, HEAD_DIM_V],
+                    cache_policy=kv_policy,
                 )
             k1_r_writer.commit(k1_pipe_idx)
 
@@ -403,24 +463,30 @@ def _flash_mla_ws_kv_producer(
             kv_row0 = page0 * PAGE_SIZE
 
             k0_l_slot = k0_l_writer.acquire(pipe_idx)
-            tle.gpu.copy(
-                Kv_desc, k0_l_slot.sK, [BLOCK_N, HEAD_DIM_V // 2], [kv_row0, 0]
+            _copy_with_cache_policy(
+                Kv_desc,
+                k0_l_slot.sK,
+                [BLOCK_N, HEAD_DIM_V // 2],
+                [kv_row0, 0],
+                cache_policy=kv_policy,
             )
             k0_l_writer.commit(pipe_idx)
 
             k0_r_slot = k0_r_writer.acquire(pipe_idx)
-            tle.gpu.copy(
+            _copy_with_cache_policy(
                 Kv_desc,
                 k0_r_slot.sK,
                 [BLOCK_N, HEAD_DIM_V // 2],
                 [kv_row0, HEAD_DIM_V // 2],
+                cache_policy=kv_policy,
             )
             if HAVE_TAIL:
-                tle.gpu.copy(
+                _copy_with_cache_policy(
                     Kv_tail_desc,
                     k0_r_slot.sK_tail,
                     [BLOCK_N, D_CHUNK],
                     [kv_row0, HEAD_DIM_V],
+                    cache_policy=kv_policy,
                 )
             k0_r_writer.commit(pipe_idx)
 
@@ -903,6 +969,8 @@ def flash_mla_splitkv_ws_tle_kernel(
     HEAD_DIM: tl.constexpr,
     D_CHUNK: tl.constexpr,
     META_FIELDS: tl.constexpr,
+    EVICT_Q: tl.constexpr = False,
+    EVICT_KV: tl.constexpr = False,
 ):
     m_block_idx = tl.program_id(0)
     partition_idx = tl.program_id(1)
@@ -1181,6 +1249,8 @@ def flash_mla_splitkv_ws_tle_kernel(
                     HEAD_DIM_V,
                     D_CHUNK,
                     HAVE_TAIL,
+                    EVICT_Q,
+                    EVICT_KV,
                 ),
             ),
         ],
@@ -1643,6 +1713,17 @@ class FlashMLATLEDecodePlan:
             can_cache=(blocked_k_tle is blocked_k),
         )
 
+        capacity = block_table.shape[1] * self.block_size
+        evict_kv = (
+            _EVICT_FIRST.value is not None
+            and self.dtype == torch.bfloat16
+            and self.block_size == 64
+            and self.d == 576
+            and self.dv == 512
+            and capacity >= 8192
+        )
+        evict_q = evict_kv and (self.h_q <= 64 or capacity >= 32768)
+
         flash_mla_splitkv_ws_tle_kernel[(self.num_m_blocks, self.num_sm_parts)](
             q_desc,
             q_tail_desc,
@@ -1671,6 +1752,8 @@ class FlashMLATLEDecodePlan:
             HEAD_DIM=self.d,
             D_CHUNK=self.d_chunk,
             META_FIELDS=FLASH_MLA_META_FIELDS,
+            EVICT_Q=evict_q,
+            EVICT_KV=evict_kv,
             num_warps=4,
             num_stages=1,
         )
