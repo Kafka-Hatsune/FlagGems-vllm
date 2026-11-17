@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+
 import triton
 
 from flaggems_vllm.runtime.backend._nvidia.hopper.ops.per_token_quant_int8 import (
@@ -24,3 +26,14 @@ if triton.__version__ >= "3.4":
     )
 
 __all__ = ["per_token_quant_int8", "w8a8_block_fp8_matmul"]
+
+if (
+    importlib.util.find_spec("triton.experimental") is not None
+    and importlib.util.find_spec("triton.experimental.tle") is not None
+):
+    from flaggems_vllm.runtime.backend._nvidia.hopper.ops.lightning_attention import (
+        lightning_attention,
+        lightning_attention_decode,
+    )
+
+    __all__ += ["lightning_attention", "lightning_attention_decode"]
