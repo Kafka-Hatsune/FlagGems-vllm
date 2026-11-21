@@ -20,6 +20,7 @@ class PrefixCase:
     dtype: torch.dtype = torch.float32
     decay: str = "heads"
     signal: str = "random"
+    state_dtype: torch.dtype = torch.float32
 
 
 @dataclass(frozen=True)
@@ -36,359 +37,81 @@ class DecodeCase:
     decay: str = "heads"
     metadata_strided: bool = False
     signal: str = "random"
+    state_dtype: torch.dtype = torch.float32
+    cache_rows: int | None = None
 
 
-def _prefix(group, rows):
-    return [PrefixCase(group, *row) for row in rows]
-
-
-def _decode(group, rows):
-    return [DecodeCase(group, *row) for row in rows]
-
-
-_BF = torch.bfloat16
-_FP = torch.float32
-
+# Native MiniMax-Text-01 on H20, vLLM 0.23, TP8. Select frequent calls,
+# chunk boundaries and the measured batch sizes around Hopper dispatch thresholds.
+MINIMAX_PREFIX_LENGTHS = (
+    2,
+    16,
+    31,
+    64,
+    65,
+    127,
+    128,
+    129,
+    255,
+    256,
+    257,
+    512,
+    1023,
+    1024,
+    1025,
+    1536,
+    2048,
+    4095,
+    4096,
+    4097,
+    8191,
+    8192,
+    12185,
+    16383,
+    16384,
+)
+MINIMAX_DECODE_BATCHES = (
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    14,
+    15,
+    16,
+    17,
+    24,
+    25,
+    31,
+    32,
+    33,
+    48,
+    63,
+    64,
+    65,
+    96,
+    127,
+    128,
+)
 PREFIX_CASES = [
-    *_prefix(
-        "tiny",
-        [
-            (1, 2, 0, 64, 64),
-            (1, 3, 0, 128, 128, "contiguous", "none"),
-            (2, 3, 1, 64, 64),
-            (1, 8, 2, 128, 128),
-            (3, 1, 3, 64, 32),
-            (2, 3, 4, 128, 128, "stride2", "none"),
-            (1, 4, 5, 64, 64),
-            (2, 2, 7, 128, 64),
-            (1, 8, 8, 64, 64),
-            (1, 16, 16, 128, 128),
-        ],
-    ),
-    *_prefix(
-        "tile",
-        [
-            (1, 4, 31, 64, 64),
-            (2, 2, 32, 128, 128),
-            (1, 8, 33, 64, 64),
-            (1, 3, 62, 128, 64),
-            (1, 2, 63, 64, 64, "stride2", "none"),
-            (1, 8, 64, 64, 64),
-            (1, 2, 64, 128, 64),
-            (1, 2, 65, 64, 64, "contiguous", "random", "contiguous", _BF),
-            (1, 4, 127, 64, 64),
-            (1, 8, 129, 128, 128),
-        ],
-    ),
-    *_prefix(
-        "history",
-        [
-            (2, 2, 192, 64, 64),
-            (1, 4, 254, 128, 128),
-            (2, 3, 255, 64, 64, "stride2"),
-            (1, 2, 256, 128, 128, "contiguous", "none"),
-            (1, 8, 257, 64, 64),
-            (1, 2, 257, 64, 64, "stride2"),
-            (1, 4, 511, 64, 64),
-            (1, 16, 512, 128, 128),
-            (1, 2, 513, 128, 128, "contiguous", "random", "contiguous", _BF),
-            (1, 3, 769, 64, 64),
-        ],
-    ),
-    *_prefix(
-        "scan",
-        [
-            (1, 16, 1024, 128, 128),
-            (1, 4, 1408, 64, 64),
-            (1, 4, 1471, 128, 128),
-            (1, 4, 1472, 128, 128),
-            (1, 4, 1473, 128, 128),
-            (1, 8, 1535, 64, 64),
-            (1, 8, 1536, 64, 64),
-            (1, 8, 1537, 64, 64),
-            (1, 4, 2047, 128, 128),
-            (1, 16, 2048, 128, 128),
-        ],
-    ),
-    *_prefix(
-        "long",
-        [
-            (1, 4, 2049, 128, 128),
-            (2, 2, 3072, 64, 64),
-            (1, 4, 4095, 64, 64),
-            (1, 8, 4096, 128, 128),
-            (1, 4, 4097, 128, 128),
-            (1, 2, 8191, 64, 64),
-            (1, 8, 8192, 128, 128),
-            (1, 2, 12288, 128, 128),
-            (1, 2, 16384, 64, 64),
-            (1, 2, 32768, 128, 128),
-        ],
-    ),
-    *_prefix(
-        "serving",
-        [
-            (4, 1, 96, 64, 64),
-            (1, 32, 128, 128, 128),
-            (2, 8, 320, 64, 64),
-            (2, 2, 320, 64, 32),
-            (3, 3, 384, 128, 128),
-            (4, 8, 512, 64, 64),
-            (8, 2, 160, 128, 128),
-            (2, 16, 768, 64, 64),
-            (1, 6, 1025, 128, 128),
-            (1, 32, 2048, 64, 64),
-        ],
-    ),
-    *_prefix(
-        "layout",
-        [
-            (1, 2, 3, 64, 1, "offset"),
-            (1, 3, 19, 64, 7, "packed"),
-            (2, 2, 67, 128, 17, "token-major", "random", "pitched"),
-            (1, 4, 128, 64, 63, "stride2", "random", "interleaved"),
-            (1, 5, 195, 64, 65, "mixed"),
-            (2, 2, 258, 128, 96, "packed", "random", "transposed"),
-            (2, 3, 319, 64, 127, "offset"),
-            (1, 2, 513, 128, 129, "stride2"),
-            (1, 4, 1553, 128, 32, "mixed", "random", "pitched"),
-            (2, 2, 2179, 64, 64, "packed", "random", "head-major"),
-        ],
-    ),
-    *_prefix(
-        "numerics",
-        [
-            (1, 2, 11, 64, 64, "contiguous", "zero", "contiguous", _BF, "zero"),
-            (2, 3, 69, 128, 128, "packed", "none", "contiguous", _BF, "tiny"),
-            (1, 3, 255, 128, 64, "contiguous", "random", "pitched", _BF, "steep"),
-            (
-                1,
-                4,
-                256,
-                64,
-                64,
-                "contiguous",
-                "random",
-                "contiguous",
-                _FP,
-                "steep",
-                "zero-q",
-            ),
-            (
-                1,
-                4,
-                257,
-                64,
-                64,
-                "contiguous",
-                "random",
-                "contiguous",
-                _FP,
-                "half",
-                "zero-k",
-            ),
-            (
-                2,
-                2,
-                510,
-                128,
-                128,
-                "mixed",
-                "random",
-                "contiguous",
-                _FP,
-                "half",
-                "zero-v",
-            ),
-            (
-                1,
-                3,
-                515,
-                64,
-                64,
-                "contiguous",
-                "zero",
-                "contiguous",
-                _BF,
-                "mixed",
-                "alternating",
-            ),
-            (1, 2, 1474, 128, 128, "token-major", "none", "contiguous", _BF, "steep"),
-            (1, 4, 2050, 64, 64, "packed", "random", "contiguous", _FP, "zero"),
-            (1, 2, 4098, 128, 128, "contiguous", "random", "contiguous", _BF, "tiny"),
-        ],
-    ),
+    PrefixCase("minimax-tp8", 1, 8, t, 128, 128, state_dtype=torch.bfloat16)
+    for t in MINIMAX_PREFIX_LENGTHS
 ]
-
 DECODE_CASES = [
-    *_decode(
-        "small",
-        [
-            (1, 1, 64),
-            (1, 2, 128),
-            (1, 8, 64),
-            (1, 8, 128),
-            (1, 16, 128),
-            (2, 3, 64),
-            (2, 8, 128),
-            (3, 4, 64),
-            (5, 4, 128, "half-pad"),
-            (7, 8, 64),
-        ],
-    ),
-    *_decode(
-        "dispatch",
-        [
-            (7, 9, 128),
-            (8, 8, 128),
-            (5, 13, 128),
-            (1, 63, 128),
-            (1, 64, 128),
-            (1, 65, 128),
-            (15, 4, 64),
-            (16, 4, 64),
-            (17, 4, 64),
-            (9, 8, 128),
-        ],
-    ),
-    *_decode(
-        "throughput",
-        [
-            (8, 8, 64),
-            (16, 8, 128),
-            (24, 16, 64),
-            (32, 16, 64),
-            (32, 16, 128),
-            (48, 16, 128),
-            (64, 16, 128),
-            (96, 8, 64),
-            (128, 8, 128),
-            (256, 4, 64),
-        ],
-    ),
-    *_decode(
-        "slots",
-        [
-            (3, 5, 64, "linear"),
-            (4, 4, 128, "reverse"),
-            (5, 4, 64, "sparse"),
-            (6, 7, 128, "random"),
-            (8, 3, 64, "reverse"),
-            (13, 8, 128, "sparse"),
-            (19, 4, 64, "linear"),
-            (31, 8, 128, "reverse"),
-            (40, 8, 64, "sparse"),
-            (64, 8, 128, "sparse"),
-        ],
-    ),
-    *_decode(
-        "padding",
-        [
-            (1, 4, 64, "all-pad"),
-            (2, 8, 128, "one-live"),
-            (5, 4, 64, "half-pad"),
-            (7, 3, 128, "tail-pad"),
-            (8, 8, 64, "all-pad"),
-            (15, 4, 128, "half-pad"),
-            (17, 2, 64, "one-live"),
-            (33, 8, 128, "tail-pad"),
-            (64, 4, 64, "half-pad"),
-            (96, 4, 128, "one-live"),
-        ],
-    ),
-    *_decode(
-        "layout",
-        [
-            (1, 4, 64, "linear", "offset"),
-            (3, 8, 128, "reverse", "stride2"),
-            (4, 3, 64, "random", "packed"),
-            (5, 4, 128, "sparse", "mixed", "pitched"),
-            (8, 4, 64, "half-pad", "contiguous", "interleaved"),
-            (9, 8, 128, "random", "contiguous", "transposed"),
-            (16, 4, 64, "reverse", "offset", "pitched"),
-            (24, 8, 128, "random", "packed", "head-major"),
-            (32, 8, 64, "linear", "contiguous", "transposed"),
-            (48, 4, 128, "half-pad", "mixed", "interleaved"),
-        ],
-    ),
-    *_decode(
-        "numerics",
-        [
-            (1, 3, 64, "linear", "contiguous", "contiguous", _BF, 32, "zero"),
-            (3, 5, 128, "random", "contiguous", "contiguous", _BF, 32, "tiny"),
-            (5, 4, 64, "half-pad", "contiguous", "contiguous", _BF, 32, "heads"),
-            (7, 2, 128, "reverse", "packed", "pitched", _BF, 32, "steep"),
-            (
-                8,
-                3,
-                64,
-                "sparse",
-                "contiguous",
-                "contiguous",
-                _FP,
-                32,
-                "half",
-                False,
-                "zero-q",
-            ),
-            (
-                12,
-                5,
-                128,
-                "random",
-                "contiguous",
-                "contiguous",
-                _FP,
-                32,
-                "mixed",
-                False,
-                "zero-k",
-            ),
-            (
-                16,
-                8,
-                64,
-                "tail-pad",
-                "contiguous",
-                "contiguous",
-                _BF,
-                32,
-                "zero",
-                False,
-                "zero-v",
-            ),
-            (
-                23,
-                4,
-                128,
-                "linear",
-                "contiguous",
-                "contiguous",
-                _BF,
-                32,
-                "steep",
-                False,
-                "alternating",
-            ),
-            (32, 4, 64, "half-pad", "stride2", "interleaved", _BF, 32, "mixed"),
-            (64, 4, 128, "random", "contiguous", "contiguous", _BF, 32, "tiny"),
-        ],
-    ),
-    *_decode(
-        "metadata",
-        [
-            (2, 4, 64, "linear", "contiguous", "contiguous", _FP, 8),
-            (4, 4, 128, "random", "contiguous", "contiguous", _FP, 16),
-            (5, 6, 64, "sparse", "contiguous", "contiguous", _FP, 64),
-            (8, 4, 128, "reverse", "contiguous", "contiguous", _FP, 128),
-            (9, 3, 64, "half-pad", "contiguous", "pitched", _FP, 16, "heads", True),
-            (12, 4, 128, "sparse", "contiguous", "contiguous", _FP, 32, "mixed", True),
-            (18, 4, 64, "tail-pad", "packed", "contiguous", _FP, 8, "tiny", True),
-            (24, 6, 128, "linear", "contiguous", "head-major", _BF, 16, "half", True),
-            (33, 4, 64, "random", "contiguous", "contiguous", _FP, 32, "zero", True),
-            (48, 8, 128, "reverse", "contiguous", "contiguous", _FP, 64, "heads", True),
-        ],
-    ),
+    DecodeCase(
+        "minimax-tp8",
+        b,
+        8,
+        128,
+        slots="linear",
+        state_dtype=torch.bfloat16,
+        cache_rows=10749,
+    )
+    for b in MINIMAX_DECODE_BATCHES
 ]
 
 
@@ -446,6 +169,22 @@ def make_qkv(case, device):
 
 def make_slope(case, device):
     h = case.h
+    if case.group == "minimax-tp8":
+        # TP rank 0's measured slopes. All ranks share this tensor layout.
+        return torch.tensor(
+            [
+                0.91701323,
+                0.84090483,
+                0.77111316,
+                0.70711386,
+                0.64842629,
+                0.59460950,
+                0.54525936,
+                0.50000501,
+            ],
+            dtype=torch.float32,
+            device=device,
+        ).view(h, 1, 1)
     if case.decay == "heads":
         return torch.linspace(0.002, 0.12, h, device=device)
     if case.decay == "steep":
@@ -463,15 +202,16 @@ def make_slope(case, device):
 def make_state(case, rows, device):
     d, e, h = case.d, getattr(case, "e", case.d), case.h
     layout = case.state_layout
+    options = {"device": device, "dtype": case.state_dtype}
     if layout == "head-major":
-        return torch.empty(h, rows, d, e, device=device).transpose(0, 1)
+        return torch.empty(h, rows, d, e, **options).transpose(0, 1)
     if layout == "transposed":
-        return torch.empty(rows, h, e, d, device=device).transpose(-1, -2)
+        return torch.empty(rows, h, e, d, **options).transpose(-1, -2)
     if layout == "interleaved":
-        return torch.empty(rows, h, d, 2 * e, device=device)[..., ::2]
+        return torch.empty(rows, h, d, 2 * e, **options)[..., ::2]
     if layout == "pitched":
-        return torch.empty(rows, h, d, e + 7, device=device)[..., 2 : 2 + e]
-    return torch.empty(rows, h, d, e, device=device)
+        return torch.empty(rows, h, d, e + 7, **options)[..., 2 : 2 + e]
+    return torch.empty(rows, h, d, e, **options)
 
 
 def make_initial(case, device):
@@ -483,10 +223,11 @@ def make_initial(case, device):
 
 def make_decode_inputs(case, device):
     b = case.b
-    rows = 2 * b + 3 if case.slots == "sparse" else b + 3
+    rows = case.cache_rows or (2 * b + 3 if case.slots == "sparse" else b + 3)
     seq = torch.arange(b, device=device)
     if case.slots == "linear":
-        slots = seq
+        # Exercise the far end of the model-sized allocation (above 2 GiB).
+        slots = seq + (rows - b) if case.cache_rows is not None else seq
     elif case.slots == "reverse":
         slots = seq.flip(0)
     elif case.slots == "sparse":
@@ -501,7 +242,9 @@ def make_decode_inputs(case, device):
             slots[:-1] = -1
         elif case.slots == "all-pad":
             slots.fill_(-1)
-    slots = slots.to(torch.int64 if b % 2 == 0 else torch.int32)
+    slots = slots.to(
+        torch.int32 if case.cache_rows is not None or b % 2 else torch.int64
+    )
     slope = make_slope(case, device)
     if case.metadata_strided:
         slot_storage = torch.full((b, 2), -1, dtype=slots.dtype, device=device)

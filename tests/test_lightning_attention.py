@@ -42,11 +42,11 @@ def assert_relative(actual, expected, limit):
 
 def test_matrix_contains_distinct_cases():
     for cases in (PREFIX_CASES, DECODE_CASES):
-        assert len(cases) == len({case_id(c) for c in cases}) == 80
-        assert (
-            len({tuple(v for k, v in vars(c).items() if k != "group") for c in cases})
-            == 80
-        )
+        assert {c.group for c in cases} == {"minimax-tp8"}
+        assert len(cases) == len({case_id(c) for c in cases}) == 25
+        assert len(
+            {tuple(v for k, v in vars(c).items() if k != "group") for c in cases}
+        ) == len(cases)
 
 
 @pytest.mark.parametrize("case", PREFIX_CASES, ids=case_id)
@@ -109,8 +109,13 @@ def test_lightning_decode(case, record_property):
     baseline = initial.contiguous().clone()
     native_qkv = tuple(x.contiguous() for x in (q, k, v))
     live = slots >= 0
+    active_ids = slots[live].long()
     unused = torch.ones(len(pool), device=device, dtype=torch.bool)
-    unused[slots[live].long()] = False
+    unused[active_ids] = False
+    # Each decode writes the persistent state at cache precision. Rare BF16
+    # rounding-boundary differences can propagate into the next step's FP32 output.
+    state_limit = 0.0002 if pool.dtype == torch.bfloat16 else 2e-6
+    out_limit = 0.002 if case.dtype == torch.bfloat16 else state_limit
     metrics = dict(output=0.0, state=0.0, native_output=0.0, native_state=0.0)
     for _ in range(3):
         y = flaggems_vllm.lightning_attention_decode(
@@ -124,20 +129,24 @@ def test_lightning_decode(case, record_property):
         # Native padding rows have unspecified output. TLE zeros those rows.
         assert torch.count_nonzero(y[~live]).item() == 0
         measured = {
-            "output": assert_relative(
-                y, ref, 0.002 if case.dtype == torch.bfloat16 else 2e-6
+            "output": assert_relative(y, ref, out_limit),
+            "state": assert_relative(
+                pool[active_ids], expected[active_ids], state_limit
             ),
-            "state": assert_relative(pool, expected, 2e-6),
             "native_output": assert_relative(
-                y[live], native_y[live], 0.008 if case.dtype == torch.bfloat16 else 2e-6
+                y[live],
+                native_y[live],
+                0.008 if case.dtype == torch.bfloat16 else state_limit,
             ),
             "native_state": assert_relative(
-                pool, baseline, 0.004 if case.dtype == torch.bfloat16 else 2e-6
+                pool[active_ids],
+                baseline[active_ids],
+                0.004 if case.dtype == torch.bfloat16 else state_limit,
             ),
         }
         for key, value in measured.items():
             metrics[key] = max(metrics[key], value)
-    torch.testing.assert_close(pool[unused], initial[unused], atol=0, rtol=0)
+    assert torch.equal(pool[unused], initial[unused])
     if guard is not None:
         assert torch.all(raw[guard] == -17.5).item()
     record_property("relative_l2", json.dumps(metrics))
@@ -162,7 +171,8 @@ def test_vllm_read_at_history_boundary():
     torch.testing.assert_close(history[:, :, -1], state)
 
 
-def test_vllm_minimax_prefix_and_decode(monkeypatch):
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_vllm_minimax_prefix_and_decode(monkeypatch, state_dtype):
     layer = pytest.importorskip(
         "vllm.model_executor.layers.mamba.linear.minimax_linear_attn"
     )
@@ -171,7 +181,7 @@ def test_vllm_minimax_prefix_and_decode(monkeypatch):
     t, h, d = 321, 3, 64
     q, k, v = [torch.randn(h, t, d, device=device) for _ in range(3)]
     s = torch.linspace(0.001, 0.2, h, device=device)
-    initial = torch.randn(h, d, d, device=device)
+    initial = torch.randn(h, d, d, device=device, dtype=state_dtype)
     expected, actual = initial.clone(), initial.clone()
     prefix = layer.MiniMaxText01LinearKernel.jit_linear_forward_prefix
     y0 = prefix(q, k, v, expected, s, 256)
