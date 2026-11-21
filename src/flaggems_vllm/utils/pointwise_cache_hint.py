@@ -60,6 +60,9 @@ _VENDOR_FAMILIES = {
         "silu_and_mul_kernel",
         "gelu_none_and_mul_kernel",
     },
+    "thead": {
+        "silu_and_mul_kernel",
+    },
 }
 
 
