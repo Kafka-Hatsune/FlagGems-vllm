@@ -54,6 +54,7 @@ POLICIES = {
 _VENDOR_FAMILIES = {
     "mthreads": {
         "silu_and_mul_kernel",
+        "gelu_none_and_mul_kernel",
     },
 }
 
