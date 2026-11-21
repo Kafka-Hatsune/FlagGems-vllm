@@ -58,6 +58,7 @@ _VENDOR_FAMILIES = {
     },
     "metax": {
         "silu_and_mul_kernel",
+        "gelu_none_and_mul_kernel",
     },
 }
 
